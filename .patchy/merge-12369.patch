@@ -1,0 +1,761 @@
+From 29be218abc3b085d78f69161e29169af5bbbdc47 Mon Sep 17 00:00:00 2001
+From: psyvern <psyv3rn@proton.me>
+Date: Tue, 4 Feb 2025 15:07:23 +0100
+Subject: [PATCH] merge branch 12369/icons-v2
+
+---
+ Cargo.lock                      |   2 +
+ helix-term/src/ui/editor.rs     |  17 +-
+ helix-term/src/ui/statusline.rs |  45 ++-
+ helix-view/Cargo.toml           |   2 +
+ helix-view/src/editor.rs        |   5 +
+ helix-view/src/gutter.rs        |  26 +-
+ helix-view/src/icons.rs         | 467 ++++++++++++++++++++++++++++++++
+ helix-view/src/lib.rs           |   1 +
+ 8 files changed, 542 insertions(+), 23 deletions(-)
+ create mode 100644 helix-view/src/icons.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 8531d0a3..bff6e1db 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1564,6 +1564,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "slotmap",
++ "smartstring",
+  "tempfile",
+  "thiserror 2.0.11",
+  "tokio",
+@@ -2419,6 +2420,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
+ dependencies = [
+  "autocfg",
++ "serde",
+  "static_assertions",
+  "version_check",
+ ]
+diff --git a/helix-term/src/ui/editor.rs b/helix-term/src/ui/editor.rs
+index 6fecd512..267e63cc 100644
+--- a/helix-term/src/ui/editor.rs
++++ b/helix-term/src/ui/editor.rs
+@@ -24,7 +24,7 @@
+ };
+ use helix_view::{
+     annotations::diagnostics::DiagnosticFilter,
+-    document::{Mode, SCRATCH_BUFFER_NAME},
++    document::{Mode, DEFAULT_LANGUAGE_NAME, SCRATCH_BUFFER_NAME},
+     editor::{CompleteAction, CursorShapeConfig},
+     graphics::{Color, CursorKind, Modifier, Rect, Style},
+     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
+@@ -646,7 +646,20 @@ pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface)
+                 bufferline_inactive
+             };
+ 
+-            let text = format!(" {}{} ", fname, if doc.is_modified() { "[+]" } else { "" });
++            let lang = doc.language_name().unwrap_or(DEFAULT_LANGUAGE_NAME);
++            let config = editor.config();
++            let icon = config.icons.mime.get(lang);
++
++            let text = if lang == icon {
++                format!(" {} {}", fname, if doc.is_modified() { "[+] " } else { "" })
++            } else {
++                format!(
++                    " {icon} {} {}",
++                    fname,
++                    if doc.is_modified() { "[+] " } else { "" }
++                )
++            };
++
+             let used_width = viewport.x.saturating_sub(x);
+             let rem_width = surface.area.width.saturating_sub(used_width);
+ 
+diff --git a/helix-term/src/ui/statusline.rs b/helix-term/src/ui/statusline.rs
+index 7437cbd0..f02b4b88 100644
+--- a/helix-term/src/ui/statusline.rs
++++ b/helix-term/src/ui/statusline.rs
+@@ -243,7 +243,13 @@ fn render_diagnostics<F>(context: &mut RenderContext, write: F)
+     if warnings > 0 {
+         write(
+             context,
+-            "●".to_string(),
++            context
++                .editor
++                .config()
++                .icons
++                .diagnostic
++                .warning()
++                .to_string(),
+             Some(context.editor.theme.get("warning")),
+         );
+         write(context, format!(" {} ", warnings), None);
+@@ -252,7 +258,7 @@ fn render_diagnostics<F>(context: &mut RenderContext, write: F)
+     if errors > 0 {
+         write(
+             context,
+-            "●".to_string(),
++            context.editor.config().icons.diagnostic.error().to_string(),
+             Some(context.editor.theme.get("error")),
+         );
+         write(context, format!(" {} ", errors), None);
+@@ -285,7 +291,13 @@ fn render_workspace_diagnostics<F>(context: &mut RenderContext, write: F)
+     if warnings > 0 {
+         write(
+             context,
+-            "●".to_string(),
++            context
++                .editor
++                .config()
++                .icons
++                .diagnostic
++                .warning()
++                .to_string(),
+             Some(context.editor.theme.get("warning")),
+         );
+         write(context, format!(" {} ", warnings), None);
+@@ -294,7 +306,7 @@ fn render_workspace_diagnostics<F>(context: &mut RenderContext, write: F)
+     if errors > 0 {
+         write(
+             context,
+-            "●".to_string(),
++            context.editor.config().icons.diagnostic.error().to_string(),
+             Some(context.editor.theme.get("error")),
+         );
+         write(context, format!(" {} ", errors), None);
+@@ -410,9 +422,13 @@ fn render_file_type<F>(context: &mut RenderContext, write: F)
+ where
+     F: Fn(&mut RenderContext, String, Option<Style>) + Copy,
+ {
+-    let file_type = context.doc.language_name().unwrap_or(DEFAULT_LANGUAGE_NAME);
++    let icons = &context.editor.config().icons;
+ 
+-    write(context, format!(" {} ", file_type), None);
++    let icon = icons
++        .mime
++        .get(context.doc.language_name().unwrap_or(DEFAULT_LANGUAGE_NAME));
++
++    write(context, format!(" {} ", icon), None);
+ }
+ 
+ fn render_file_name<F>(context: &mut RenderContext, write: F)
+@@ -514,13 +530,18 @@ fn render_version_control<F>(context: &mut RenderContext, write: F)
+ where
+     F: Fn(&mut RenderContext, String, Option<Style>) + Copy,
+ {
+-    let head = context
+-        .doc
+-        .version_control_head()
+-        .unwrap_or_default()
+-        .to_string();
++    let head = context.doc.version_control_head().unwrap_or_default();
++
++    let icons = &context.editor.config().icons;
++    let icon = icons.vcs.icon();
++
++    let vcs = if head.is_empty() {
++        format!("{head}")
++    } else {
++        format!("{icon} {head}")
++    };
+ 
+-    write(context, head, None);
++    write(context, vcs, None);
+ }
+ 
+ fn render_register<F>(context: &mut RenderContext, write: F)
+diff --git a/helix-view/Cargo.toml b/helix-view/Cargo.toml
+index da9f52a2..eb1b660f 100644
+--- a/helix-view/Cargo.toml
++++ b/helix-view/Cargo.toml
+@@ -52,6 +52,8 @@ log = "~0.4"
+ parking_lot = "0.12.3"
+ thiserror.workspace = true
+ 
++smartstring = { version = "1.0.1", features = ["serde"]}
++
+ [target.'cfg(windows)'.dependencies]
+ clipboard-win = { version = "5.4", features = ["std"] }
+ 
+diff --git a/helix-view/src/editor.rs b/helix-view/src/editor.rs
+index 739dcfb4..f48eb77b 100644
+--- a/helix-view/src/editor.rs
++++ b/helix-view/src/editor.rs
+@@ -7,6 +7,7 @@
+     events::DocumentFocusLost,
+     graphics::{CursorKind, Rect},
+     handlers::Handlers,
++    icons,
+     info::Info,
+     input::KeyEvent,
+     register::Registers,
+@@ -17,6 +18,7 @@
+ use dap::StackFrame;
+ use helix_event::dispatch;
+ use helix_vcs::DiffProviderRegistry;
++use icons::Icons;
+ 
+ use futures_util::stream::select_all::SelectAll;
+ use futures_util::{future, StreamExt};
+@@ -360,6 +362,8 @@ pub struct Config {
+     pub end_of_line_diagnostics: DiagnosticFilter,
+     // Set to override the default clipboard provider
+     pub clipboard_provider: ClipboardProvider,
++    /// Centralized location for icons that can be used throughout the UI  
++    pub icons: Icons,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Eq, PartialOrd, Ord)]
+@@ -1001,6 +1005,7 @@ fn default() -> Self {
+             inline_diagnostics: InlineDiagnosticsConfig::default(),
+             end_of_line_diagnostics: DiagnosticFilter::Disable,
+             clipboard_provider: ClipboardProvider::default(),
++            icons: Icons::default(),
+         }
+     }
+ }
+diff --git a/helix-view/src/gutter.rs b/helix-view/src/gutter.rs
+index 7cd91271..ac5c2f0b 100644
+--- a/helix-view/src/gutter.rs
++++ b/helix-view/src/gutter.rs
+@@ -46,7 +46,7 @@ pub fn width(self, view: &View, doc: &Document) -> usize {
+ }
+ 
+ pub fn diagnostic<'doc>(
+-    _editor: &'doc Editor,
++    editor: &'doc Editor,
+     doc: &'doc Document,
+     _view: &View,
+     theme: &Theme,
+@@ -57,6 +57,7 @@ pub fn diagnostic<'doc>(
+     let info = theme.get("info");
+     let hint = theme.get("hint");
+     let diagnostics = &doc.diagnostics;
++    let symbols = editor.config().icons.diagnostic.clone();
+ 
+     Box::new(
+         move |line: usize, _selected: bool, first_visual_line: bool, out: &mut String| {
+@@ -74,13 +75,14 @@ pub fn diagnostic<'doc>(
+                             .any(|ls| ls.id() == d.provider)
+                 });
+             diagnostics_on_line.max_by_key(|d| d.severity).map(|d| {
+-                write!(out, "●").ok();
+-                match d.severity {
+-                    Some(Severity::Error) => error,
+-                    Some(Severity::Warning) | None => warning,
+-                    Some(Severity::Info) => info,
+-                    Some(Severity::Hint) => hint,
+-                }
++                let (style, symbol) = match d.severity {
++                    Some(Severity::Error) => (error, symbols.error()),
++                    Some(Severity::Warning) | None => (warning, symbols.warning()),
++                    Some(Severity::Info) => (info, symbols.info()),
++                    Some(Severity::Hint) => (hint, symbols.hint()),
++                };
++                out.push_str(symbol);
++                style
+             })
+         },
+     )
+@@ -263,7 +265,13 @@ pub fn breakpoints<'doc>(
+                 breakpoint_style
+             };
+ 
+-            let sym = if breakpoint.verified { "●" } else { "◯" };
++            let config = editor.config();
++
++            let sym = if breakpoint.verified {
++                config.icons.dap.verified()
++            } else {
++                config.icons.dap.unverified()
++            };
+             write!(out, "{}", sym).unwrap();
+             Some(style)
+         },
+diff --git a/helix-view/src/icons.rs b/helix-view/src/icons.rs
+new file mode 100644
+index 00000000..f7e1984e
+--- /dev/null
++++ b/helix-view/src/icons.rs
+@@ -0,0 +1,467 @@
++use std::collections::HashMap;
++
++use serde::{Deserialize, Serialize};
++
++use smartstring::{LazyCompact, SmartString};
++
++type String = SmartString<LazyCompact>;
++
++// TODO: Vcs { added  , removed  , ignored  , modified  , renamed  }
++// TODO: Snippet {enabled, icon  }
++// TODO: Text/Spellcheck { enabled, icon 󰓆 }
++
++#[derive(Debug, Serialize, Deserialize, Default, PartialEq, Eq, Clone)]
++#[serde(default)]
++pub struct Icons {
++    pub mime: Mime,
++    pub lsp: Lsp,
++    pub diagnostic: Diagnostic,
++    pub vcs: Vcs,
++    pub dap: Dap,
++}
++
++// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_documentSymbol
++#[derive(Debug, Serialize, Deserialize, Default, PartialEq, Eq, Clone)]
++pub struct Lsp {
++    enabled: bool,
++
++    file: Option<String>,
++    module: Option<String>,
++    namespace: Option<String>,
++    package: Option<String>,
++    class: Option<String>,
++    method: Option<String>,
++    property: Option<String>,
++    field: Option<String>,
++    constructor: Option<String>,
++    #[serde(rename = "enum")]
++    r#enum: Option<String>,
++    interface: Option<String>,
++    function: Option<String>,
++    variable: Option<String>,
++    constant: Option<String>,
++    string: Option<String>,
++    number: Option<String>,
++    boolean: Option<String>,
++    array: Option<String>,
++    object: Option<String>,
++    key: Option<String>,
++    null: Option<String>,
++    enum_member: Option<String>,
++    #[serde(rename = "struct")]
++    r#struct: Option<String>,
++    event: Option<String>,
++    operator: Option<String>,
++    type_parameter: Option<String>,
++}
++
++impl Lsp {
++    #[inline]
++    pub fn file(&self) -> &str {
++        if self.enabled {
++            return self.file.as_ref().map_or("", |file| file);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn module(&self) -> &str {
++        if self.enabled {
++            return self.module.as_ref().map_or("", |module| module);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn namespace(&self) -> &str {
++        if self.enabled {
++            return self.namespace.as_ref().map_or("", |namespace| namespace);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn package(&self) -> &str {
++        if self.enabled {
++            return self.package.as_ref().map_or("", |package| package);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn class(&self) -> &str {
++        if self.enabled {
++            return self.class.as_ref().map_or("", |class| class);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn method(&self) -> &str {
++        if self.enabled {
++            return self.method.as_ref().map_or("", |method| method);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn property(&self) -> &str {
++        if self.enabled {
++            return self.property.as_ref().map_or("", |property| property);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn field(&self) -> &str {
++        if self.enabled {
++            return self.field.as_ref().map_or("", |field| field);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn constructor(&self) -> &str {
++        if self.enabled {
++            return self
++                .constructor
++                .as_ref()
++                .map_or("", |constructor| constructor);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn r#enum(&self) -> &str {
++        if self.enabled {
++            return self.r#enum.as_ref().map_or("", |r#enum| r#enum);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn interface(&self) -> &str {
++        if self.enabled {
++            return self.interface.as_ref().map_or("", |interface| interface);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn function(&self) -> &str {
++        if self.enabled {
++            return self.function.as_ref().map_or("", |function| function);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn variable(&self) -> &str {
++        if self.enabled {
++            return self.variable.as_ref().map_or("", |variable| variable);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn constant(&self) -> &str {
++        if self.enabled {
++            return self.constant.as_ref().map_or("", |constant| constant);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn string(&self) -> &str {
++        if self.enabled {
++            return self.string.as_ref().map_or("", |string| string);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn number(&self) -> &str {
++        if self.enabled {
++            return self.number.as_ref().map_or("", |number| number);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn boolean(&self) -> &str {
++        if self.enabled {
++            return self.boolean.as_ref().map_or("", |boolean| boolean);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn array(&self) -> &str {
++        if self.enabled {
++            return self.array.as_ref().map_or("", |array| array);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn object(&self) -> &str {
++        if self.enabled {
++            return self.object.as_ref().map_or("", |object| object);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn key(&self) -> &str {
++        if self.enabled {
++            return self.key.as_ref().map_or("", |key| key);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn null(&self) -> &str {
++        if self.enabled {
++            return self.null.as_ref().map_or("󰟢", |null| null);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn enum_member(&self) -> &str {
++        if self.enabled {
++            return self
++                .enum_member
++                .as_ref()
++                .map_or("", |enum_member| enum_member);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn r#struct(&self) -> &str {
++        if self.enabled {
++            return self.r#struct.as_ref().map_or("", |r#struct| r#struct);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn event(&self) -> &str {
++        if self.enabled {
++            return self.event.as_ref().map_or("", |event| event);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn operator(&self) -> &str {
++        if self.enabled {
++            return self.operator.as_ref().map_or("", |operator| operator);
++        }
++        ""
++    }
++
++    #[inline]
++    pub fn type_parameter(&self) -> &str {
++        if self.enabled {
++            return self
++                .type_parameter
++                .as_ref()
++                .map_or("", |type_parameter| type_parameter);
++        }
++        ""
++    }
++}
++
++#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Default)]
++pub struct Diagnostic {
++    hint: Option<String>,
++    info: Option<String>,
++    warning: Option<String>,
++    error: Option<String>,
++}
++
++impl Diagnostic {
++    #[inline]
++    pub fn hint(&self) -> &str {
++        self.hint.as_ref().map_or("○", |hint| hint)
++    }
++
++    #[inline]
++    pub fn info(&self) -> &str {
++        self.info.as_ref().map_or("●", |info| info)
++    }
++
++    #[inline]
++    pub fn warning(&self) -> &str {
++        self.warning.as_ref().map_or("▲", |warning| warning)
++    }
++
++    #[inline]
++    pub fn error(&self) -> &str {
++        self.error.as_ref().map_or("■", |error| error)
++    }
++}
++
++#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Default)]
++pub struct Vcs {
++    enabled: bool,
++    icon: Option<String>,
++}
++
++impl Vcs {
++    #[inline]
++    pub fn icon(&self) -> &str {
++        if self.enabled {
++            return self.icon.as_ref().map_or("", |icon| icon.as_str());
++        }
++        ""
++    }
++}
++
++#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Default)]
++pub struct Mime {
++    enabled: bool,
++    directory: Option<String>,
++    #[serde(flatten)]
++    mime: HashMap<String, String>,
++}
++
++static MIMES: once_cell::sync::Lazy<HashMap<String, String>> = once_cell::sync::Lazy::new(|| {
++    let mut mimes = HashMap::new();
++
++    mimes.insert(String::from("rust"), String::from("󱘗"));
++    mimes.insert(String::from("python"), String::from("󰌠"));
++    mimes.insert(String::from("c"), String::from(""));
++    mimes.insert(String::from("cpp"), String::from(""));
++    mimes.insert(String::from("c-sharp"), String::from("󰌛"));
++    mimes.insert(String::from("d"), String::from(""));
++    mimes.insert(String::from("elixir"), String::from(""));
++    mimes.insert(String::from("fsharp"), String::from(""));
++    mimes.insert(String::from("go"), String::from("󰟓"));
++    mimes.insert(String::from("haskell"), String::from("󰲒"));
++    mimes.insert(String::from("java"), String::from("󰬷"));
++    mimes.insert(String::from("javascript"), String::from("󰌞"));
++    mimes.insert(String::from("kotlin"), String::from("󱈙"));
++    mimes.insert(String::from("html"), String::from("󰌝"));
++    mimes.insert(String::from("css"), String::from("󰌜"));
++    mimes.insert(String::from("scss"), String::from("󰌜"));
++    mimes.insert(String::from("typescript"), String::from("󰛦"));
++    mimes.insert(String::from("bash"), String::from(""));
++    mimes.insert(String::from("php"), String::from("󰌟"));
++    mimes.insert(String::from("powershell"), String::from("󰨊"));
++    mimes.insert(String::from("dart"), String::from(""));
++    mimes.insert(String::from("ruby"), String::from("󰴭"));
++    mimes.insert(String::from("swift"), String::from("󰛥"));
++    mimes.insert(String::from("r"), String::from("󰟔"));
++    mimes.insert(String::from("groovy"), String::from(""));
++    mimes.insert(String::from("scala"), String::from(""));
++    mimes.insert(String::from("perl"), String::from(""));
++    mimes.insert(String::from("clojure"), String::from(""));
++    mimes.insert(String::from("julia"), String::from(""));
++    mimes.insert(String::from("zig"), String::from(""));
++    mimes.insert(String::from("fortran"), String::from("󱈚"));
++    mimes.insert(String::from("erlang"), String::from(""));
++    mimes.insert(String::from("ocaml"), String::from(""));
++    mimes.insert(String::from("crystal"), String::from(""));
++    mimes.insert(String::from("svelte"), String::from(""));
++    mimes.insert(String::from("gdscript"), String::from(""));
++    mimes.insert(String::from("nim"), String::from(""));
++    mimes.insert(String::from("jsx"), String::from(""));
++    mimes.insert(String::from("tsx"), String::from(""));
++    mimes.insert(String::from("twig"), String::from(""));
++    mimes.insert(String::from("lua"), String::from(""));
++    mimes.insert(String::from("vue"), String::from(""));
++    mimes.insert(String::from("prolog"), String::from(""));
++    mimes.insert(String::from("common-lisp"), String::from(""));
++    mimes.insert(String::from("elm"), String::from(""));
++    mimes.insert(String::from("rescript"), String::from(""));
++    mimes.insert(String::from("solidity"), String::from(""));
++    mimes.insert(String::from("vala"), String::from(""));
++    mimes.insert(String::from("scheme"), String::from(""));
++    mimes.insert(String::from("v"), String::from(""));
++    mimes.insert(String::from("prisma"), String::from(""));
++    mimes.insert(String::from("ada"), String::from(""));
++    mimes.insert(String::from("astro"), String::from(""));
++    mimes.insert(String::from("matlab"), String::from(""));
++    mimes.insert(String::from("rst"), String::from(""));
++    mimes.insert(String::from("opencl"), String::from(""));
++    mimes.insert(String::from("nunjuks"), String::from(""));
++    mimes.insert(String::from("jinja"), String::from(""));
++
++    mimes.insert(String::from("bicep"), String::from(""));
++
++    mimes.insert(String::from("wasm"), String::from(""));
++
++    mimes.insert(String::from("docker"), String::from("󰡨"));
++    mimes.insert(String::from("docker-compose"), String::from("󰡨"));
++    mimes.insert(String::from("make"), String::from(""));
++    mimes.insert(String::from("cmake"), String::from(""));
++    mimes.insert(String::from("nix"), String::from(""));
++    mimes.insert(String::from("awk"), String::from(""));
++    mimes.insert(String::from("llvm"), String::from(""));
++    mimes.insert(String::from("llvm-mir"), String::from(""));
++    mimes.insert(String::from("regex"), String::from(""));
++    mimes.insert(String::from("graphql"), String::from(""));
++
++    mimes.insert(String::from("text"), String::from(""));
++    mimes.insert(String::from("markdown"), String::from(""));
++    mimes.insert(String::from("typst"), String::from(""));
++    mimes.insert(String::from("json"), String::from("󰘦"));
++    mimes.insert(String::from("toml"), String::from(""));
++    mimes.insert(String::from("xml"), String::from("󰗀"));
++    mimes.insert(String::from("latex"), String::from(""));
++    mimes.insert(String::from("git-commit"), String::from(""));
++    mimes.insert(String::from("git-rebase"), String::from(""));
++    mimes.insert(String::from("git-config"), String::from(""));
++    mimes.insert(String::from("todotxt"), String::from(""));
++    mimes.insert(String::from("hyprlang"), String::from(""));
++    mimes.insert(String::from("helm"), String::from(""));
++    mimes.insert(String::from("nginx"), String::from(""));
++
++    mimes
++});
++
++impl Mime {
++    #[inline]
++    pub fn directory(&self) -> &str {
++        if self.enabled {
++            return self.directory.as_ref().map_or("󰉋", |directory| directory);
++        } else if let Some(directory) = &self.directory {
++            return directory;
++        }
++        ""
++    }
++
++    // Returns the symbol that matches the name, if any, otherwise returns the name back.
++    #[inline]
++    pub fn get<'name, 'mime: 'name>(&'mime self, name: &'name str) -> &'name str {
++        if self.enabled {
++            if let Some(symbol) = self.mime.get(name) {
++                return symbol;
++            } else if let Some(symbol) = MIMES.get(name) {
++                return symbol;
++            }
++        }
++        name
++    }
++}
++
++#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Default)]
++pub struct Dap {
++    verified: Option<String>,
++    unverified: Option<String>,
++}
++
++impl Dap {
++    #[inline]
++    pub fn verified(&self) -> &str {
++        self.verified.as_ref().map_or("●", |verified| verified)
++    }
++
++    #[inline]
++    pub fn unverified(&self) -> &str {
++        self.verified.as_ref().map_or("◯", |verified| verified)
++    }
++}
+diff --git a/helix-view/src/lib.rs b/helix-view/src/lib.rs
+index d54b49ef..a5b45159 100644
+--- a/helix-view/src/lib.rs
++++ b/helix-view/src/lib.rs
+@@ -10,6 +10,7 @@
+ pub mod graphics;
+ pub mod gutter;
+ pub mod handlers;
++pub mod icons;
+ pub mod info;
+ pub mod input;
+ pub mod keyboard;
+-- 
+2.47.1
+

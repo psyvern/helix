@@ -1,0 +1,33 @@
+# Main github repository to fetch from.
+# This is going to be our base, into which we merge patches and pull requests.
+repo = "helix-editor/helix"
+
+# The main repository's branch
+#
+# -> To use a specific commit, use the following syntax:
+#   remote-branch = "<branch> @ <hash-of-commit>"
+remote-branch = "master"
+
+# Branch which patchy will use to do all of its work on
+local-branch = "patchy"
+
+# list of pull requests numbers which you would like to merge into the repository and branch you have specified previously
+#
+# To use a specific commit, use the following syntax:
+#   "<pull-request-number> @ <hash-of-commit>"
+pull-requests = [
+  # "12308", # color swatches
+  "12520", # picker title
+  "12768", # highlight rust string interpolation macros
+]
+
+# Optional: A list of patches to apply
+#
+# A patch allows you to do specify custom commits and not have to rely on there being a pull request for that change
+#
+# You can generate patches from a commit with: `patchy gen-patch <commit-hash>`.
+# See `patchy gen-patch --help` for more info.
+patches = [
+  "merge-12151", # completion item kinds
+  "merge-12369", # icon support
+]
